@@ -56,6 +56,14 @@ handle_request(Sock, Views) ->
                 <<"\r\n\r\n">>,
                 Error
             ]),
+            close;
+        _ ->
+            gen_tcp:send(Sock, [
+                <<"HTTP/1.0 400 Bad Request\r\n">>,
+                <<"Access-Control-Allow-Origin: *\r\n">>,
+                <<"\r\n\r\n">>,
+                "Bad Request"
+            ]),
             close
     end.
 
