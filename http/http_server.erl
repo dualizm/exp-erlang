@@ -1,5 +1,5 @@
 -module(http_server).
--export([start/0, start/1]).
+-export([start/0, start/1, stop/1, get_views/1]).
 
 -record(request, {
     method  = undef,
@@ -38,62 +38,108 @@ random_phrase() ->
         true -> "Whaaaat"
     end.
 
-handle_request(Sock) ->
+handle_request(Sock, Views) ->
     case parse_request(Sock) of
         ignore -> close;
-        {ok, #request{path = Path, headers = #{'Connection' := Conn}}} 
-            when Conn =:= "keep-alive";
-                 Conn =:= "Keep-Alive" ->
-            Body = [random_phrase(), " on ", Path],
-            CLen = iolist_size(Body),
-            gen_tcp:send(Sock, 
-                [
-                    "HTTP/1.0 200 OK\r\n",
-                    "Access-Control-Allow-Origin: *\r\n",
-                    "Connection: keep-alive\r\n",
-                    "Content-Type: text/plain\r\n",
-                    ["Content-Length: ", integer_to_list(CLen)],
-                    "\r\n\r\n",
-                    Body
-                ]),
-            loop;
-        {ok, #request{path = Path}} ->
-            gen_tcp:send(Sock, [
-                "HTTP/1.0 200 OK\r\n",
-                "Access-Control-Allow-Origin: *\r\n",
-                "Content-Type: text/plain",
-                "\r\n\r\n",
-                random_phrase(), " on ", Path
-            ]),
-            close;
+        {ok, Req = #request{}} ->
+            {Resp, KA} = get_response(Req, Views),
+            gen_tcp:send(Sock, Resp),
+            case KA of
+                true -> loop;
+                false -> close
+            end;
         {error, Error} ->
             io:format("Error: ~p~n", [Error]),
             gen_tcp:send(Sock, [
                 <<"HTTP/1.0 500 Internal Error\r\n">>,
                 <<"Access-Control-Allow-Origin: *\r\n">>,
-                <<"Content-Type: text/plain">>,
                 <<"\r\n\r\n">>,
-                Error,
-                random_phrase()
+                Error
             ]),
             close
     end.
 
-accept_loop(LSock) ->
-    {ok, Sock} = gen_tcp:accept(LSock),
-    handle_loop(Sock),
-    accept_loop(LSock).
+format_views(1) -> ["There is 1 view already!"];
+format_views(N) -> ["There are ", integer_to_list(N), " views already!"].
 
-handle_loop(Sock) ->
-    case handle_request(Sock) of
-        loop -> handle_loop(Sock);
+get_body(#request{path = Path}, Views) ->
+    ViewCnt = get_views(Path, Views),
+    Body = ["The page '", Path,
+            "' is cool, isn't it?\r\n",
+            format_views(ViewCnt)],
+    {Body, iolist_size(Body)}.
+
+is_keep_alive(#request{headers = #{'Connection' := Conn}}) ->
+    string:to_lower(Conn) =:= "keep-alive";
+is_keep_alive(_) -> false.
+
+get_headers(KA, CLen) ->
+    Conn = case KA of
+        true -> {"Connection", "keep-alive"};
+        false -> {"Connection", "close"}
+    end,
+    ContLen = {"Connection-Length",
+                integer_to_list(CLen)},
+    Headers = [Conn, ContLen],
+    [ [Name, ": ", Value, "\r\n"]
+        || {Name, Value} <- Headers].
+
+get_views(Path, Views) ->
+    ets:update_counter(Views, Path, 1, {Path, 0}).
+
+get_response(Req, Views) ->
+    {Body, CLen} = get_body(Req, Views),
+    IsKA  = is_keep_alive(Req),
+    Headers = get_headers(IsKA, CLen),
+    Resp = iolist_to_binary([<<"HTTP/1.0 200 OK\r\n">>,
+            <<"Access-Control-Allow-Origin: *\r\n">>,
+            <<Headers/binary>>,
+            <<"\r\n\r\n">>,
+            <<Body/binary>>]),
+    {Resp, IsKA}.
+
+accept_loop(LSock, Views) ->
+    case gen_tcp:accept(LSock) of
+        {ok, Sock} ->
+            spawn(fun() -> handle_loop(Sock, Views) end),
+            accept_loop(LSock, Views);
+        _ -> ok
+    end.
+
+handle_loop(Sock, Views) ->
+    case handle_request(Sock, Views) of
+        loop -> handle_loop(Sock, Views);
         close -> gen_tcp:close(Sock)
     end.
 
 start() -> start(8080).
 start(Port) ->
-    Opts = [{packet, http},
-            {active, false},
-            {backlog, 1024}],
-    {ok, LSock} = gen_tcp:listen(Port, Opts),
-    accept_loop(LSock).
+    spawn(fun() ->
+        Views = ets:new(request_count, [set, public]),
+
+        Opts = [{packet, http},
+                {active, false},
+                {backlog, 1024}],
+        {ok, LSock} = gen_tcp:listen(Port, Opts),
+        spawn(fun() -> accept_loop(LSock, Views) end),
+        command_loop(LSock, Views)
+    end).
+
+command_loop(LSock, Views) ->
+    receive
+        stop ->
+            gen_tcp:close(LSock);
+        {get_views, Caller} ->
+            Data = ets:tab2list(Views),
+            Caller ! {views, Data},
+            command_loop(LSock, Views)
+    end.
+
+stop(Pid) ->
+    Pid ! stop.
+
+get_views(Pid) ->
+    Pid ! {get_views, self()},
+    receive
+        {views, Views} -> Views
+    end.
