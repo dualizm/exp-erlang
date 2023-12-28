@@ -54,8 +54,6 @@ unpack_header(X) ->
 	_:_ -> error
     end.
 
-
-
 decode_header(<<2#11111111111:11,B:2,C:2,_D:1,E:4,F:2,G:1,Bits:9>>) ->
     Vsn = case B of
 	      0 -> {2,5};
