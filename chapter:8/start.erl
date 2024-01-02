@@ -4,7 +4,7 @@
 start(AnAtom, Fun) ->
     case whereis(AnAtom) of
         undefined -> register(AnAtom, spawn(fun() -> Fun() end));
-        _ -> "It's registered"
+        _ -> io:format("Registration failed. Retry or handle the error.~n")
     end.
 
 test(AnAtom) ->

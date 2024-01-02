@@ -1,16 +1,22 @@
 -module(ring_test).
--export([start/1]).
+-export([start/3]).
 
-start(N) ->
-    Pid = spawn(fun() -> ring(N, self()) end),
-    Pid ! {start, self()}.
+start(N, M, Msg) ->
+    Processes = [spawn(fun() -> proc() end) || _ <- lists:seq(1, N)],
+    Linked = lists:append(Processes, [hd(Processes)]),
+    {Time, _} = timer:tc(fun send_message/2, [{Msg, M}, Linked]),
+    io:format("*Time execution: ~p*~n", [Time / 1_000]).
 
-ring(0, FirstPid) ->
-    FirstPid ! {done, self()};
-
-ring(N, PrevPid) ->
-    NextPid = spawn(fun() -> ring(N - 1, PrevPid) end),
-    PrevPid ! {next, NextPid},
+proc() ->
     receive
-        {start, StartPid} -> StartPid ! {next, NextPid}
+        {stop, [NextPid | RestPids]} ->
+            NextPid ! {stop, RestPids};
+        {Msg, NumMsgs, [NextPid | RestPids]} ->
+            NextPid ! {Msg, NumMsgs, RestPids},
+            proc()
     end.
+
+send_message({_, 0}, [NextPid | RestPids]) -> NextPid ! {stop, RestPids};
+send_message({Msg, M}, [NextPid | RestPids] = Pids) ->
+    NextPid ! {Msg, M, RestPids},
+    send_message({Msg, M - 1}, Pids).
